@@ -109,7 +109,7 @@ async function executeCommand(userId, serverId, command) {
     return `❌ SSH Connection Failed\n\n` +
       `Error: ${error.message}\n\n` +
       `Troubleshooting:\n` +
-      `1. Test manually: ssh -v ${servers[serverId]?.username}@${servers[serverId]?.host}\n` +
+    return `❌ SSH Error: ${error.message}`;
       `2. Check port: telnet ${servers[serverId]?.host} ${servers[serverId]?.port || 22}\n` +
       `3. Verify password/key is correct\n` +
       `4. Check firewall allows port ${servers[serverId]?.port || 22}`;
