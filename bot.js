@@ -21,6 +21,9 @@ const connections = {};
 // User context to track selected server
 const userContext = {};
 
+// Track active listeners per user
+const activeListeners = {};
+
 function getUserServersPath(userId) {
   return `${USER_DATA_DIR}/${userId}.json`;
 }
@@ -82,14 +85,15 @@ async function executeCommand(userId, serverId, command) {
         privateKeyPath: serverConfig.privateKeyPath,
         password: serverConfig.password,
         port: serverConfig.port || 22,
-        readyTimeout: 20000,
+        readyTimeout: 30000,
+        socketConnectTimeout: 30000,
       });
     }
 
     const result = await ssh.execCommand(command);
     return result.stdout || result.stderr || 'Command executed (no output)';
   } catch (error) {
-    return `Error: ${error.message}`;
+    return `❌ SSH Error: ${error.message}\n\nTips:\n- Check host/username/password\n- Verify firewall allows port 22\n- Try: ssh -v ${servers[serverId]?.username}@${servers[serverId]?.host}`;
   }
 }
 
@@ -105,10 +109,27 @@ function getServerKeyboard(userId) {
   return Markup.inlineKeyboard(buttons);
 }
 
+// Set bot commands for / autocomplete
+bot.telegram.setMyCommands([
+  { command: 'start', description: 'Welcome message' },
+  { command: 'servers', description: 'List your servers' },
+  { command: 'addserver', description: 'Add a new server' },
+  { command: 'select', description: 'Select a server' },
+  { command: 'removeserver', description: 'Delete a server' },
+  { command: 'status', description: 'System status' },
+  { command: 'cpu', description: 'CPU usage' },
+  { command: 'memory', description: 'Memory stats' },
+  { command: 'disk', description: 'Disk usage' },
+  { command: 'uptime', description: 'System uptime' },
+  { command: 'processes', description: 'Top processes' },
+  { command: 'run', description: 'Run custom command' },
+  { command: 'help', description: 'Show all commands' },
+]);
+
 // Start command
 bot.command('start', (ctx) => {
   ctx.reply(
-    `Welcome to VPS Manager Bot! ��\n\n` +
+    `Welcome to VPS Manager Bot! 🤖\n\n` +
     `Available commands:\n` +
     `/servers - List your servers\n` +
     `/addserver - Add a new server\n` +
@@ -169,12 +190,14 @@ bot.action(/server_(.+)/, (ctx) => {
 
 // Add server
 bot.command('addserver', async (ctx) => {
+  // Remove old listener if exists
+  if (activeListeners[ctx.from.id]) {
+    bot.off('text', activeListeners[ctx.from.id]);
+  }
+
   ctx.reply(
     '⚠️ **SECURITY NOTE:** Do NOT paste your actual private key!\n\n' +
-    'Instead:\n' +
-    '1. Upload your SSH key to your VPS\n' +
-    '2. Note the file path (e.g., `/root/.ssh/id_rsa`)\n' +
-    '3. Send the JSON with the PATH:\n\n' +
+    'Send JSON config for your server:\n\n' +
     '```json\n' +
     '{\n' +
     '  "name": "prod-server",\n' +
@@ -184,7 +207,7 @@ bot.command('addserver', async (ctx) => {
     '  "privateKeyPath": "/root/.ssh/id_rsa"\n' +
     '}\n' +
     '```\n\n' +
-    'Or use password auth instead (safer for cloud):\n\n' +
+    'Or with password:\n\n' +
     '```json\n' +
     '{\n' +
     '  "name": "staging",\n' +
@@ -196,9 +219,6 @@ bot.command('addserver', async (ctx) => {
     '```',
     { parse_mode: 'Markdown' }
   );
-
-  let step = 0;
-  let tempConfig = {};
 
   const listener = (msg) => {
     try {
@@ -224,12 +244,16 @@ bot.command('addserver', async (ctx) => {
 
       saveUserServers(ctx.from.id, servers);
       ctx.reply(`✅ Server "${config.name}" added!`);
+      
+      // Clean up listener
       bot.off('text', listener);
+      delete activeListeners[ctx.from.id];
     } catch (error) {
-      ctx.reply('❌ Invalid JSON format');
+      ctx.reply('❌ Invalid JSON format. Make sure all text is in double quotes and syntax is correct.');
     }
   };
 
+  activeListeners[ctx.from.id] = listener;
   bot.on('text', listener);
 });
 
@@ -375,11 +399,17 @@ bot.command('run', (ctx) => {
     return;
   }
 
+  // Remove old listener if exists
+  if (activeListeners[ctx.from.id]) {
+    bot.off('text', activeListeners[ctx.from.id]);
+  }
+
   ctx.reply('Send the command you want to execute on the server.');
 
   const listener = async (msg) => {
     if (msg.text.startsWith('/')) {
       bot.off('text', listener);
+      delete activeListeners[ctx.from.id];
       return;
     }
 
@@ -394,8 +424,10 @@ bot.command('run', (ctx) => {
     );
 
     bot.off('text', listener);
+    delete activeListeners[ctx.from.id];
   };
 
+  activeListeners[ctx.from.id] = listener;
   bot.on('text', listener);
 });
 
