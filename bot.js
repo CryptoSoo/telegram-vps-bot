@@ -5,17 +5,14 @@ const fs = require('fs');
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 
-// User whitelist
 const ALLOWED_USERS = process.env.ALLOWED_USERS ? 
   process.env.ALLOWED_USERS.split(',').map(id => parseInt(id)) : [];
 
-// Per-user server storage
 const USER_DATA_DIR = './user_data';
 if (!fs.existsSync(USER_DATA_DIR)) {
   fs.mkdirSync(USER_DATA_DIR);
 }
 
-// Store SSH connections
 const connections = {};
 const userContext = {};
 const userMode = {};
@@ -51,7 +48,6 @@ function checkAuth(ctx, next) {
 
 bot.use(checkAuth);
 
-// SSH connection with better error handling
 async function executeCommand(userId, serverId, command) {
   try {
     const servers = loadUserServers(userId);
@@ -105,14 +101,7 @@ async function executeCommand(userId, serverId, command) {
   } catch (error) {
     console.error(`[SSH Error] ${error.message}`);
     console.error(`[SSH Error Stack] ${error.stack}`);
-    
-    return `❌ SSH Connection Failed\n\n` +
-      `Error: ${error.message}\n\n` +
-      `Troubleshooting:\n` +
     return `❌ SSH Error: ${error.message}`;
-      `2. Check port: telnet ${servers[serverId]?.host} ${servers[serverId]?.port || 22}\n` +
-      `3. Verify password/key is correct\n` +
-      `4. Check firewall allows port ${servers[serverId]?.port || 22}`;
   }
 }
 
@@ -146,41 +135,35 @@ function getServerKeyboard(userId) {
   if (keys.length === 0) {
     return null;
   }
-
   const buttons = keys.map(key => [Markup.button.callback(key, `server_${key}`)]);
   return Markup.inlineKeyboard(buttons);
 }
 
 bot.telegram.setMyCommands([
-  { command: 'start', description: 'Welcome message' },
-  { command: 'servers', description: 'List your servers' },
-  { command: 'addserver', description: 'Add a new server' },
-  { command: 'select', description: 'Select a server' },
-  { command: 'removeserver', description: 'Delete a server' },
-  { command: 'status', description: 'System status' },
-  { command: 'cpu', description: 'CPU usage' },
-  { command: 'memory', description: 'Memory stats' },
-  { command: 'disk', description: 'Disk usage' },
-  { command: 'uptime', description: 'System uptime' },
-  { command: 'processes', description: 'Top processes' },
-  { command: 'run', description: 'Run custom command' },
-  { command: 'help', description: 'Show all commands' },
-  { command: 'testconnection', description: 'Test SSH connection' },
+  { command: 'start', description: 'Welcome' },
+  { command: 'servers', description: 'List servers' },
+  { command: 'addserver', description: 'Add server' },
+  { command: 'select', description: 'Select server' },
+  { command: 'removeserver', description: 'Delete server' },
+  { command: 'cpu', description: 'CPU' },
+  { command: 'memory', description: 'Memory' },
+  { command: 'disk', description: 'Disk' },
+  { command: 'run', description: 'Run command' },
+  { command: 'testconnection', description: 'Test SSH' },
 ]);
 
 bot.command('start', (ctx) => {
   ctx.reply(
-    `Welcome to VPS Manager Bot! 🤖\n\n` +
-    `/servers - List servers\n` +
-    `/addserver - Add server\n` +
-    `/select - Select server\n` +
-    `/cpu - CPU usage\n` +
+    `🤖 VPS Manager\n\n` +
+    `/servers - List\n` +
+    `/addserver - Add\n` +
+    `/select - Select\n` +
+    `/cpu - CPU\n` +
     `/memory - Memory\n` +
     `/disk - Disk\n` +
-    `/run - Run command\n` +
-    `/testconnection - Debug SSH\n` +
-    `/help - Help\n\n` +
-    `Your ID: <code>${ctx.from.id}</code>`,
+    `/run - Run\n` +
+    `/testconnection - Test\n\n` +
+    `ID: <code>${ctx.from.id}</code>`,
     { parse_mode: 'HTML' }
   );
 });
@@ -194,11 +177,10 @@ bot.command('servers', (ctx) => {
     return;
   }
 
-  let message = '📍 Your Servers:\n\n';
+  let message = '📍 Servers:\n\n';
   keys.forEach((key) => {
-    const server = servers[key];
     const current = userContext[ctx.from.id] === key ? '✅' : '⚪';
-    message += `${current} **${key}** - ${server.host}:${server.port || 22}\n`;
+    message += `${current} ${key}\n`;
   });
 
   ctx.replyWithMarkdown(message, getServerKeyboard(ctx.from.id));
@@ -207,17 +189,17 @@ bot.command('servers', (ctx) => {
 bot.command('select', (ctx) => {
   const servers = loadUserServers(ctx.from.id);
   if (Object.keys(servers).length === 0) {
-    ctx.reply('No servers available.');
+    ctx.reply('No servers');
     return;
   }
-  ctx.reply('Select a server:', getServerKeyboard(ctx.from.id));
+  ctx.reply('Select:', getServerKeyboard(ctx.from.id));
 });
 
 bot.action(/server_(.+)/, (ctx) => {
   const serverId = ctx.match[1];
   userContext[ctx.from.id] = serverId;
   ctx.answerCbQuery(`Selected: ${serverId}`);
-  ctx.reply(`✅ Selected: "${serverId}"`);
+  ctx.reply(`✅ ${serverId}`);
 });
 
 bot.command('addserver', (ctx) => {
@@ -231,12 +213,12 @@ bot.command('removeserver', (ctx) => {
   const keys = Object.keys(servers);
   
   if (keys.length === 0) {
-    ctx.reply('No servers to remove.');
+    ctx.reply('No servers');
     return;
   }
 
   const buttons = keys.map(key => [Markup.button.callback(`🗑️ ${key}`, `delete_${key}`)]);
-  ctx.reply('Delete which server?', Markup.inlineKeyboard(buttons));
+  ctx.reply('Delete?', Markup.inlineKeyboard(buttons));
 });
 
 bot.action(/delete_(.+)/, (ctx) => {
@@ -249,21 +231,20 @@ bot.action(/delete_(.+)/, (ctx) => {
       delete userContext[ctx.from.id];
     }
     saveUserServers(ctx.from.id, servers);
-    ctx.answerCbQuery(`Deleted: ${serverId}`);
-    ctx.reply(`✅ Deleted: "${serverId}"`);
+    ctx.answerCbQuery(`Deleted`);
+    ctx.reply(`✅ Deleted`);
   }
 });
 
-// Test connection command
 bot.command('testconnection', async (ctx) => {
   const serverId = userContext[ctx.from.id];
   if (!serverId) {
-    ctx.reply('Select a server with /select first');
+    ctx.reply('Use /select first');
     return;
   }
 
-  ctx.reply('🧪 Testing SSH connection...');
-  const result = await executeCommand(ctx.from.id, serverId, 'echo "SSH Connection OK!"');
+  ctx.reply('🧪 Testing...');
+  const result = await executeCommand(ctx.from.id, serverId, 'echo "OK"');
   await sendLargeOutput(ctx, 'echo test', result);
 });
 
@@ -271,21 +252,10 @@ function getCurrentServer(userId) {
   return userContext[userId];
 }
 
-bot.command('status', async (ctx) => {
-  const serverId = getCurrentServer(ctx.from.id);
-  if (!serverId) {
-    ctx.reply('Use /select first');
-    return;
-  }
-  ctx.sendChatAction('typing');
-  const uptime = await executeCommand(ctx.from.id, serverId, 'uptime -p');
-  ctx.reply(`⏱️ Uptime:\n${uptime}`);
-});
-
 bot.command('cpu', async (ctx) => {
   const serverId = getCurrentServer(ctx.from.id);
   if (!serverId) {
-    ctx.reply('Use /select first');
+    ctx.reply('Use /select');
     return;
   }
   ctx.sendChatAction('typing');
@@ -296,7 +266,7 @@ bot.command('cpu', async (ctx) => {
 bot.command('memory', async (ctx) => {
   const serverId = getCurrentServer(ctx.from.id);
   if (!serverId) {
-    ctx.reply('Use /select first');
+    ctx.reply('Use /select');
     return;
   }
   ctx.sendChatAction('typing');
@@ -307,7 +277,7 @@ bot.command('memory', async (ctx) => {
 bot.command('disk', async (ctx) => {
   const serverId = getCurrentServer(ctx.from.id);
   if (!serverId) {
-    ctx.reply('Use /select first');
+    ctx.reply('Use /select');
     return;
   }
   ctx.sendChatAction('typing');
@@ -318,27 +288,11 @@ bot.command('disk', async (ctx) => {
 bot.command('run', (ctx) => {
   const serverId = getCurrentServer(ctx.from.id);
   if (!serverId) {
-    ctx.reply('Use /select first');
+    ctx.reply('Use /select');
     return;
   }
   userMode[ctx.from.id] = 'run';
   ctx.reply('Send command:');
-});
-
-bot.command('help', (ctx) => {
-  ctx.reply(
-    `📋 Commands:\n\n` +
-    `/servers - List\n` +
-    `/addserver - Add\n` +
-    `/select - Select\n` +
-    `/cpu - CPU\n` +
-    `/memory - Memory\n` +
-    `/disk - Disk\n` +
-    `/run - Run\n` +
-    `/testconnection - Test SSH\n` +
-    `/help - Help`,
-    { parse_mode: 'Markdown' }
-  );
 });
 
 bot.on('text', async (ctx) => {
@@ -368,7 +322,7 @@ bot.on('text', async (ctx) => {
       };
 
       saveUserServers(userId, servers);
-      ctx.reply(`✅ Server "${config.name}" added!`);
+      ctx.reply(`✅ Added!`);
       delete userMode[userId];
     } catch (error) {
       ctx.reply('❌ Invalid JSON');
@@ -376,7 +330,7 @@ bot.on('text', async (ctx) => {
   } else if (mode === 'run') {
     const serverId = getCurrentServer(userId);
     if (!serverId) {
-      ctx.reply('No server selected');
+      ctx.reply('No server');
       return;
     }
 
@@ -396,6 +350,3 @@ process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 bot.launch();
 console.log('🤖 Bot started!');
-if (ALLOWED_USERS.length > 0) {
-  console.log(`✅ Auth: ${ALLOWED_USERS.length} user(s)`);
-}
