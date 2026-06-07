@@ -21,8 +21,8 @@ const connections = {};
 // User context to track selected server
 const userContext = {};
 
-// Track active listeners per user
-const activeListeners = {};
+// Track which user is in which mode (addserver, run, etc)
+const userMode = {};
 
 function getUserServersPath(userId) {
   return `${USER_DATA_DIR}/${userId}.json`;
@@ -93,7 +93,35 @@ async function executeCommand(userId, serverId, command) {
     const result = await ssh.execCommand(command);
     return result.stdout || result.stderr || 'Command executed (no output)';
   } catch (error) {
-    return `❌ SSH Error: ${error.message}\n\nTips:\n- Check host/username/password\n- Verify firewall allows port 22\n- Try: ssh -v ${servers[serverId]?.username}@${servers[serverId]?.host}`;
+    console.error('SSH Error:', error);
+    return `❌ SSH Error: ${error.message}`;
+  }
+}
+
+// Split large output into chunks for Telegram
+async function sendLargeOutput(ctx, command, result) {
+  const maxLen = 4000;
+  
+  if (result.length <= maxLen) {
+    ctx.reply(
+      `📤 Command: \`${command}\`\n\n📥 Result:\n\`\`\`\n${result}\n\`\`\``,
+      { parse_mode: 'Markdown' }
+    );
+  } else {
+    // Send command
+    ctx.reply(`📤 Command: \`${command}\`\n\n📥 Result (part 1/${Math.ceil(result.length / maxLen)}):`, 
+      { parse_mode: 'Markdown' });
+    
+    // Split and send chunks
+    for (let i = 0; i < result.length; i += maxLen) {
+      const chunk = result.substring(i, i + maxLen);
+      const partNum = Math.floor(i / maxLen) + 1;
+      const totalParts = Math.ceil(result.length / maxLen);
+      
+      await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit
+      ctx.reply(`\`\`\`\n${chunk}\n\`\`\`\n(part ${partNum}/${totalParts})`, 
+        { parse_mode: 'Markdown' });
+    }
   }
 }
 
@@ -190,11 +218,8 @@ bot.action(/server_(.+)/, (ctx) => {
 
 // Add server
 bot.command('addserver', async (ctx) => {
-  // Remove old listener if exists
-  if (activeListeners[ctx.from.id]) {
-    bot.off('text', activeListeners[ctx.from.id]);
-  }
-
+  userMode[ctx.from.id] = 'addserver';
+  
   ctx.reply(
     '⚠️ **SECURITY NOTE:** Do NOT paste your actual private key!\n\n' +
     'Send JSON config for your server:\n\n' +
@@ -219,42 +244,6 @@ bot.command('addserver', async (ctx) => {
     '```',
     { parse_mode: 'Markdown' }
   );
-
-  const listener = (msg) => {
-    try {
-      const config = JSON.parse(msg.text);
-      if (!config.name || !config.host || !config.username) {
-        ctx.reply('❌ Missing required fields: name, host, username');
-        return;
-      }
-
-      if (!config.privateKeyPath && !config.password) {
-        ctx.reply('❌ Need either privateKeyPath or password');
-        return;
-      }
-
-      const servers = loadUserServers(ctx.from.id);
-      servers[config.name] = {
-        host: config.host,
-        username: config.username,
-        port: config.port || 22,
-        privateKeyPath: config.privateKeyPath,
-        password: config.password,
-      };
-
-      saveUserServers(ctx.from.id, servers);
-      ctx.reply(`✅ Server "${config.name}" added!`);
-      
-      // Clean up listener
-      bot.off('text', listener);
-      delete activeListeners[ctx.from.id];
-    } catch (error) {
-      ctx.reply('❌ Invalid JSON format. Make sure all text is in double quotes and syntax is correct.');
-    }
-  };
-
-  activeListeners[ctx.from.id] = listener;
-  bot.on('text', listener);
 });
 
 // Remove server
@@ -399,36 +388,16 @@ bot.command('run', (ctx) => {
     return;
   }
 
-  // Remove old listener if exists
-  if (activeListeners[ctx.from.id]) {
-    bot.off('text', activeListeners[ctx.from.id]);
-  }
-
-  ctx.reply('Send the command you want to execute on the server.');
-
-  const listener = async (msg) => {
-    if (msg.text.startsWith('/')) {
-      bot.off('text', listener);
-      delete activeListeners[ctx.from.id];
-      return;
-    }
-
-    ctx.sendChatAction('typing');
-    const result = await executeCommand(ctx.from.id, serverId, msg.text);
-    
-    const trimmed = result.substring(0, 4000);
-    ctx.reply(
-      `📤 Command: \`${msg.text}\`\n\n` +
-      `📥 Result:\n\`\`\`\n${trimmed}\n\`\`\``,
-      { parse_mode: 'Markdown' }
-    );
-
-    bot.off('text', listener);
-    delete activeListeners[ctx.from.id];
-  };
-
-  activeListeners[ctx.from.id] = listener;
-  bot.on('text', listener);
+  userMode[ctx.from.id] = 'run';
+  ctx.reply(
+    '⏱️ Send the command you want to execute:\n\n' +
+    '⚠️ Note: This bot does NOT support interactive commands (scripts that ask questions).\n' +
+    'Use non-interactive commands only, for example:\n' +
+    '• `apt update && apt upgrade -y` (non-interactive)\n' +
+    '• `docker ps` (shows output)\n' +
+    '• `systemctl status nginx`\n\n' +
+    'If your command needs input, use flags to make it non-interactive.'
+  );
 });
 
 // Help command
@@ -451,6 +420,54 @@ bot.command('help', (ctx) => {
     `/run - Execute custom command`,
     { parse_mode: 'Markdown' }
   );
+});
+
+// Text handler for modes
+bot.on('text', async (ctx) => {
+  const userId = ctx.from.id;
+  const mode = userMode[userId];
+  const text = ctx.message.text;
+
+  if (mode === 'addserver') {
+    try {
+      const config = JSON.parse(text);
+      if (!config.name || !config.host || !config.username) {
+        ctx.reply('❌ Missing required fields: name, host, username');
+        return;
+      }
+
+      if (!config.privateKeyPath && !config.password) {
+        ctx.reply('❌ Need either privateKeyPath or password');
+        return;
+      }
+
+      const servers = loadUserServers(userId);
+      servers[config.name] = {
+        host: config.host,
+        username: config.username,
+        port: config.port || 22,
+        privateKeyPath: config.privateKeyPath,
+        password: config.password,
+      };
+
+      saveUserServers(userId, servers);
+      ctx.reply(`✅ Server "${config.name}" added!`);
+      delete userMode[userId];
+    } catch (error) {
+      ctx.reply('❌ Invalid JSON format. Make sure all text is in double quotes and syntax is correct.');
+    }
+  } else if (mode === 'run') {
+    const serverId = getCurrentServer(userId);
+    if (!serverId) {
+      ctx.reply('No server selected.');
+      return;
+    }
+
+    ctx.sendChatAction('typing');
+    const result = await executeCommand(userId, serverId, text);
+    await sendLargeOutput(ctx, text, result);
+    delete userMode[userId];
+  }
 });
 
 // Error handling
