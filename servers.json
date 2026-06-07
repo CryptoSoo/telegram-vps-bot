@@ -1,0 +1,8 @@
+{
+  "my-server": {
+    "host": "31.58.76.151",
+    "username": "root",
+    "port": 22,
+    "privateKeyPath": "/home/cryptosoo/.ssh/vps_key"
+  }
+}
