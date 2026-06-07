@@ -5,7 +5,7 @@ const fs = require('fs');
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
 
-// User whitelist - only these users can use the bot
+// User whitelist
 const ALLOWED_USERS = process.env.ALLOWED_USERS ? 
   process.env.ALLOWED_USERS.split(',').map(id => parseInt(id)) : [];
 
@@ -17,11 +17,7 @@ if (!fs.existsSync(USER_DATA_DIR)) {
 
 // Store SSH connections
 const connections = {};
-
-// User context to track selected server
 const userContext = {};
-
-// Track which user is in which mode (addserver, run, etc)
 const userMode = {};
 
 function getUserServersPath(userId) {
@@ -45,14 +41,9 @@ function saveUserServers(userId, servers) {
   fs.writeFileSync(path, JSON.stringify(servers, null, 2));
 }
 
-// Middleware to check if user is allowed
 function checkAuth(ctx, next) {
   if (ALLOWED_USERS.length > 0 && !ALLOWED_USERS.includes(ctx.from.id)) {
-    ctx.reply(
-      '❌ Unauthorized!\n\n' +
-      `Your ID: ${ctx.from.id}\n\n` +
-      'Ask the bot owner to add you to ALLOWED_USERS.'
-    );
+    ctx.reply('❌ Unauthorized!');
     return;
   }
   return next();
@@ -60,17 +51,20 @@ function checkAuth(ctx, next) {
 
 bot.use(checkAuth);
 
-// Helper function to execute commands via SSH
+// SSH connection with better error handling
 async function executeCommand(userId, serverId, command) {
   try {
     const servers = loadUserServers(userId);
     
     if (!servers[serverId]) {
-      return `Error: Server "${serverId}" not found`;
+      return `❌ Server "${serverId}" not found`;
     }
 
     const serverConfig = servers[serverId];
     const connectionKey = `${userId}_${serverId}`;
+
+    console.log(`[SSH] Connecting to ${serverId}...`);
+    console.log(`[SSH] Host: ${serverConfig.host}, User: ${serverConfig.username}, Port: ${serverConfig.port}`);
 
     if (!connections[connectionKey]) {
       connections[connectionKey] = new NodeSSH();
@@ -79,26 +73,49 @@ async function executeCommand(userId, serverId, command) {
     const ssh = connections[connectionKey];
 
     if (!ssh.isConnected()) {
-      await ssh.connect({
+      console.log(`[SSH] Not connected, creating new connection...`);
+      
+      const connectOptions = {
         host: serverConfig.host,
         username: serverConfig.username,
-        privateKeyPath: serverConfig.privateKeyPath,
-        password: serverConfig.password,
         port: serverConfig.port || 22,
-        readyTimeout: 30000,
-        socketConnectTimeout: 30000,
-      });
+        readyTimeout: 60000,
+        socketConnectTimeout: 60000,
+      };
+
+      if (serverConfig.password) {
+        connectOptions.password = serverConfig.password;
+        console.log(`[SSH] Using password auth`);
+      } else if (serverConfig.privateKeyPath) {
+        connectOptions.privateKeyPath = serverConfig.privateKeyPath;
+        console.log(`[SSH] Using key auth: ${serverConfig.privateKeyPath}`);
+      }
+
+      await ssh.connect(connectOptions);
+      console.log(`[SSH] Connected successfully!`);
+    } else {
+      console.log(`[SSH] Using existing connection`);
     }
 
-    const result = await ssh.execCommand(command);
+    console.log(`[SSH] Executing: ${command}`);
+    const result = await ssh.execCommand(command, { cwd: '/root' });
+    console.log(`[SSH] Command completed`);
+    
     return result.stdout || result.stderr || 'Command executed (no output)';
   } catch (error) {
-    console.error('SSH Error:', error);
-    return `❌ SSH Error: ${error.message}`;
+    console.error(`[SSH Error] ${error.message}`);
+    console.error(`[SSH Error Stack] ${error.stack}`);
+    
+    return `❌ SSH Connection Failed\n\n` +
+      `Error: ${error.message}\n\n` +
+      `Troubleshooting:\n` +
+      `1. Test manually: ssh -v ${servers[serverId]?.username}@${servers[serverId]?.host}\n` +
+      `2. Check port: telnet ${servers[serverId]?.host} ${servers[serverId]?.port || 22}\n` +
+      `3. Verify password/key is correct\n` +
+      `4. Check firewall allows port ${servers[serverId]?.port || 22}`;
   }
 }
 
-// Split large output into chunks for Telegram
 async function sendLargeOutput(ctx, command, result) {
   const maxLen = 4000;
   
@@ -108,24 +125,21 @@ async function sendLargeOutput(ctx, command, result) {
       { parse_mode: 'Markdown' }
     );
   } else {
-    // Send command
-    ctx.reply(`📤 Command: \`${command}\`\n\n📥 Result (part 1/${Math.ceil(result.length / maxLen)}):`, 
+    ctx.reply(`📤 Command: \`${command}\`\n\n📥 Result (${Math.ceil(result.length / maxLen)} parts):`, 
       { parse_mode: 'Markdown' });
     
-    // Split and send chunks
     for (let i = 0; i < result.length; i += maxLen) {
       const chunk = result.substring(i, i + maxLen);
       const partNum = Math.floor(i / maxLen) + 1;
       const totalParts = Math.ceil(result.length / maxLen);
       
-      await new Promise(resolve => setTimeout(resolve, 100)); // Rate limit
+      await new Promise(resolve => setTimeout(resolve, 100));
       ctx.reply(`\`\`\`\n${chunk}\n\`\`\`\n(part ${partNum}/${totalParts})`, 
         { parse_mode: 'Markdown' });
     }
   }
 }
 
-// Get server list keyboard
 function getServerKeyboard(userId) {
   const servers = loadUserServers(userId);
   const keys = Object.keys(servers);
@@ -137,7 +151,6 @@ function getServerKeyboard(userId) {
   return Markup.inlineKeyboard(buttons);
 }
 
-// Set bot commands for / autocomplete
 bot.telegram.setMyCommands([
   { command: 'start', description: 'Welcome message' },
   { command: 'servers', description: 'List your servers' },
@@ -152,60 +165,51 @@ bot.telegram.setMyCommands([
   { command: 'processes', description: 'Top processes' },
   { command: 'run', description: 'Run custom command' },
   { command: 'help', description: 'Show all commands' },
+  { command: 'testconnection', description: 'Test SSH connection' },
 ]);
 
-// Start command
 bot.command('start', (ctx) => {
   ctx.reply(
     `Welcome to VPS Manager Bot! 🤖\n\n` +
-    `Available commands:\n` +
-    `/servers - List your servers\n` +
-    `/addserver - Add a new server\n` +
-    `/select - Select a server\n` +
-    `/status - Get system status\n` +
-    `/cpu - Check CPU usage\n` +
-    `/memory - Check memory\n` +
-    `/disk - Check disk\n` +
-    `/uptime - Get uptime\n` +
-    `/processes - Top processes\n` +
-    `/run - Run custom command\n` +
-    `/removeserver - Delete a server\n` +
-    `/help - Show all commands\n\n` +
-    `ℹ️ Your ID: <code>${ctx.from.id}</code>`,
+    `/servers - List servers\n` +
+    `/addserver - Add server\n` +
+    `/select - Select server\n` +
+    `/cpu - CPU usage\n` +
+    `/memory - Memory\n` +
+    `/disk - Disk\n` +
+    `/run - Run command\n` +
+    `/testconnection - Debug SSH\n` +
+    `/help - Help\n\n` +
+    `Your ID: <code>${ctx.from.id}</code>`,
     { parse_mode: 'HTML' }
   );
 });
 
-// List servers
 bot.command('servers', (ctx) => {
   const servers = loadUserServers(ctx.from.id);
   const keys = Object.keys(servers);
   
   if (keys.length === 0) {
-    ctx.reply('No servers configured. Use /addserver to add one.');
+    ctx.reply('No servers. Use /addserver');
     return;
   }
 
   let message = '📍 Your Servers:\n\n';
-  keys.forEach((key, idx) => {
+  keys.forEach((key) => {
     const server = servers[key];
     const current = userContext[ctx.from.id] === key ? '✅' : '⚪';
-    message += `${current} **${key}** - ${server.host}\n`;
+    message += `${current} **${key}** - ${server.host}:${server.port || 22}\n`;
   });
 
   ctx.replyWithMarkdown(message, getServerKeyboard(ctx.from.id));
 });
 
-// Select server
 bot.command('select', (ctx) => {
   const servers = loadUserServers(ctx.from.id);
-  const keys = Object.keys(servers);
-  
-  if (keys.length === 0) {
+  if (Object.keys(servers).length === 0) {
     ctx.reply('No servers available.');
     return;
   }
-
   ctx.reply('Select a server:', getServerKeyboard(ctx.from.id));
 });
 
@@ -213,40 +217,15 @@ bot.action(/server_(.+)/, (ctx) => {
   const serverId = ctx.match[1];
   userContext[ctx.from.id] = serverId;
   ctx.answerCbQuery(`Selected: ${serverId}`);
-  ctx.reply(`✅ Server "${serverId}" selected!`);
+  ctx.reply(`✅ Selected: "${serverId}"`);
 });
 
-// Add server
-bot.command('addserver', async (ctx) => {
+bot.command('addserver', (ctx) => {
   userMode[ctx.from.id] = 'addserver';
-  
-  ctx.reply(
-    '⚠️ **SECURITY NOTE:** Do NOT paste your actual private key!\n\n' +
-    'Send JSON config for your server:\n\n' +
-    '```json\n' +
-    '{\n' +
-    '  "name": "prod-server",\n' +
-    '  "host": "1.2.3.4",\n' +
-    '  "username": "root",\n' +
-    '  "port": 22,\n' +
-    '  "privateKeyPath": "/root/.ssh/id_rsa"\n' +
-    '}\n' +
-    '```\n\n' +
-    'Or with password:\n\n' +
-    '```json\n' +
-    '{\n' +
-    '  "name": "staging",\n' +
-    '  "host": "5.6.7.8",\n' +
-    '  "username": "deploy",\n' +
-    '  "port": 22,\n' +
-    '  "password": "your_password"\n' +
-    '}\n' +
-    '```',
-    { parse_mode: 'Markdown' }
-  );
+  ctx.reply('Send JSON:\n```json\n{"name":"prod","host":"1.2.3.4","username":"root","port":22,"password":"pass"}\n```', 
+    { parse_mode: 'Markdown' });
 });
 
-// Remove server
 bot.command('removeserver', (ctx) => {
   const servers = loadUserServers(ctx.from.id);
   const keys = Object.keys(servers);
@@ -257,7 +236,7 @@ bot.command('removeserver', (ctx) => {
   }
 
   const buttons = keys.map(key => [Markup.button.callback(`🗑️ ${key}`, `delete_${key}`)]);
-  ctx.reply('Select a server to delete:', Markup.inlineKeyboard(buttons));
+  ctx.reply('Delete which server?', Markup.inlineKeyboard(buttons));
 });
 
 bot.action(/delete_(.+)/, (ctx) => {
@@ -271,158 +250,97 @@ bot.action(/delete_(.+)/, (ctx) => {
     }
     saveUserServers(ctx.from.id, servers);
     ctx.answerCbQuery(`Deleted: ${serverId}`);
-    ctx.reply(`✅ Server "${serverId}" deleted!`);
+    ctx.reply(`✅ Deleted: "${serverId}"`);
   }
 });
 
-// Get current server
+// Test connection command
+bot.command('testconnection', async (ctx) => {
+  const serverId = userContext[ctx.from.id];
+  if (!serverId) {
+    ctx.reply('Select a server with /select first');
+    return;
+  }
+
+  ctx.reply('🧪 Testing SSH connection...');
+  const result = await executeCommand(ctx.from.id, serverId, 'echo "SSH Connection OK!"');
+  await sendLargeOutput(ctx, 'echo test', result);
+});
+
 function getCurrentServer(userId) {
   return userContext[userId];
 }
 
-// Status command
 bot.command('status', async (ctx) => {
   const serverId = getCurrentServer(ctx.from.id);
   if (!serverId) {
-    ctx.reply('No server selected. Use /select first.');
+    ctx.reply('Use /select first');
     return;
   }
-
   ctx.sendChatAction('typing');
   const uptime = await executeCommand(ctx.from.id, serverId, 'uptime -p');
-  const load = await executeCommand(ctx.from.id, serverId, "cat /proc/loadavg | awk '{print $1, $2, $3}'");
-
-  ctx.reply(
-    `🖥️ Status (${serverId}):\n` +
-    `Uptime: ${uptime}\n` +
-    `Load Average: ${load}`
-  );
+  ctx.reply(`⏱️ Uptime:\n${uptime}`);
 });
 
-// CPU command
 bot.command('cpu', async (ctx) => {
   const serverId = getCurrentServer(ctx.from.id);
   if (!serverId) {
-    ctx.reply('No server selected. Use /select first.');
+    ctx.reply('Use /select first');
     return;
   }
-
   ctx.sendChatAction('typing');
-  const result = await executeCommand(
-    ctx.from.id,
-    serverId,
-    "top -bn1 | grep 'Cpu(s)' | awk '{print \"CPU Usage: \" $2}'"
-  );
-  ctx.reply(`📊 CPU (${serverId}):\n${result}`);
+  const result = await executeCommand(ctx.from.id, serverId, "top -bn1 | grep 'Cpu(s)'");
+  ctx.reply(`📊 CPU:\n${result}`);
 });
 
-// Memory command
 bot.command('memory', async (ctx) => {
   const serverId = getCurrentServer(ctx.from.id);
   if (!serverId) {
-    ctx.reply('No server selected. Use /select first.');
+    ctx.reply('Use /select first');
     return;
   }
-
   ctx.sendChatAction('typing');
-  const result = await executeCommand(
-    ctx.from.id,
-    serverId,
-    "free -h | grep Mem | awk '{print \"Total: \" $2 \"\\nUsed: \" $3 \"\\nFree: \" $4}'"
-  );
-  ctx.reply(`💾 Memory (${serverId}):\n${result}`);
+  const result = await executeCommand(ctx.from.id, serverId, 'free -h');
+  ctx.reply(`💾 Memory:\n\`\`\`\n${result}\n\`\`\``, { parse_mode: 'Markdown' });
 });
 
-// Disk command
 bot.command('disk', async (ctx) => {
   const serverId = getCurrentServer(ctx.from.id);
   if (!serverId) {
-    ctx.reply('No server selected. Use /select first.');
+    ctx.reply('Use /select first');
     return;
   }
-
   ctx.sendChatAction('typing');
-  const result = await executeCommand(
-    ctx.from.id,
-    serverId,
-    "df -h / | tail -1 | awk '{print \"Size: \" $2 \"\\nUsed: \" $3 \"\\nAvailable: \" $4 \"\\nUsage: \" $5}'"
-  );
-  ctx.reply(`💿 Disk (${serverId}):\n${result}`);
+  const result = await executeCommand(ctx.from.id, serverId, 'df -h /');
+  ctx.reply(`💿 Disk:\n\`\`\`\n${result}\n\`\`\``, { parse_mode: 'Markdown' });
 });
 
-// Uptime command
-bot.command('uptime', async (ctx) => {
-  const serverId = getCurrentServer(ctx.from.id);
-  if (!serverId) {
-    ctx.reply('No server selected. Use /select first.');
-    return;
-  }
-
-  ctx.sendChatAction('typing');
-  const result = await executeCommand(ctx.from.id, serverId, 'uptime -p');
-  ctx.reply(`⏱️ Uptime (${serverId}):\n${result}`);
-});
-
-// Processes command
-bot.command('processes', async (ctx) => {
-  const serverId = getCurrentServer(ctx.from.id);
-  if (!serverId) {
-    ctx.reply('No server selected. Use /select first.');
-    return;
-  }
-
-  ctx.sendChatAction('typing');
-  const result = await executeCommand(
-    ctx.from.id,
-    serverId,
-    "ps aux --sort=-%cpu | head -6 | tail -5 | awk '{print $11, \" (CPU: \" $3 \"%)\" }'"
-  );
-  ctx.reply(`⚙️ Top Processes (${serverId}):\n${result}`);
-});
-
-// Run custom command
 bot.command('run', (ctx) => {
   const serverId = getCurrentServer(ctx.from.id);
   if (!serverId) {
-    ctx.reply('No server selected. Use /select first.');
+    ctx.reply('Use /select first');
     return;
   }
-
   userMode[ctx.from.id] = 'run';
-  ctx.reply(
-    '⏱️ Send the command you want to execute:\n\n' +
-    '⚠️ Note: This bot does NOT support interactive commands (scripts that ask questions).\n' +
-    'Use non-interactive commands only, for example:\n' +
-    '• `apt update && apt upgrade -y` (non-interactive)\n' +
-    '• `docker ps` (shows output)\n' +
-    '• `systemctl status nginx`\n\n' +
-    'If your command needs input, use flags to make it non-interactive.'
-  );
+  ctx.reply('Send command:');
 });
 
-// Help command
 bot.command('help', (ctx) => {
   ctx.reply(
-    `📋 Available Commands:\n\n` +
-    `*Server Management:*\n` +
-    `/servers - List your servers\n` +
-    `/addserver - Add new server\n` +
-    `/select - Select active server\n` +
-    `/removeserver - Delete a server\n\n` +
-    `*Monitoring (requires /select):*\n` +
-    `/status - System status\n` +
-    `/cpu - CPU usage\n` +
-    `/memory - Memory stats\n` +
-    `/disk - Disk usage\n` +
-    `/uptime - System uptime\n` +
-    `/processes - Top processes\n\n` +
-    `*Advanced:*\n` +
-    `/run - Execute custom command`,
+    `📋 Commands:\n\n` +
+    `/servers - List\n` +
+    `/addserver - Add\n` +
+    `/select - Select\n` +
+    `/cpu - CPU\n` +
+    `/memory - Memory\n` +
+    `/disk - Disk\n` +
+    `/run - Run\n` +
+    `/testconnection - Test SSH\n` +
+    `/help - Help`,
     { parse_mode: 'Markdown' }
   );
 });
 
-// Text handler for modes
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const mode = userMode[userId];
@@ -432,12 +350,11 @@ bot.on('text', async (ctx) => {
     try {
       const config = JSON.parse(text);
       if (!config.name || !config.host || !config.username) {
-        ctx.reply('❌ Missing required fields: name, host, username');
+        ctx.reply('❌ Missing: name, host, username');
         return;
       }
-
-      if (!config.privateKeyPath && !config.password) {
-        ctx.reply('❌ Need either privateKeyPath or password');
+      if (!config.password && !config.privateKeyPath) {
+        ctx.reply('❌ Need password or privateKeyPath');
         return;
       }
 
@@ -446,20 +363,20 @@ bot.on('text', async (ctx) => {
         host: config.host,
         username: config.username,
         port: config.port || 22,
-        privateKeyPath: config.privateKeyPath,
         password: config.password,
+        privateKeyPath: config.privateKeyPath,
       };
 
       saveUserServers(userId, servers);
       ctx.reply(`✅ Server "${config.name}" added!`);
       delete userMode[userId];
     } catch (error) {
-      ctx.reply('❌ Invalid JSON format. Make sure all text is in double quotes and syntax is correct.');
+      ctx.reply('❌ Invalid JSON');
     }
   } else if (mode === 'run') {
     const serverId = getCurrentServer(userId);
     if (!serverId) {
-      ctx.reply('No server selected.');
+      ctx.reply('No server selected');
       return;
     }
 
@@ -470,19 +387,15 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// Error handling
 bot.catch((err) => {
   console.error('Bot error:', err);
 });
 
-// Graceful shutdown
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 bot.launch();
-console.log('🤖 Telegram VPS Manager Bot started!');
+console.log('🤖 Bot started!');
 if (ALLOWED_USERS.length > 0) {
-  console.log(`✅ Restricted to ${ALLOWED_USERS.length} user(s)`);
-} else {
-  console.log('⚠️ No user restrictions (public bot)');
+  console.log(`✅ Auth: ${ALLOWED_USERS.length} user(s)`);
 }
